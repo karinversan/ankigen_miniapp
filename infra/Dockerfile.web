@@ -10,6 +10,6 @@ RUN if [ -f package-lock.json ]; then npm ci --no-audit --fund=false; else npm i
 
 COPY web /app/web
 
-EXPOSE 5173
+EXPOSE 4173
 
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+CMD ["sh", "-c", "npm run build && npm run preview -- --host 0.0.0.0 --port 4173"]
