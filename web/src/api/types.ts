@@ -21,6 +21,7 @@ export type Job = {
   stage: string;
   params_json?: Record<string, unknown>;
   result_paths?: Record<string, string> | null;
+  metrics_json?: Record<string, unknown> | null;
   error_message?: string | null;
 };
 

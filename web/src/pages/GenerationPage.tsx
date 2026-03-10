@@ -33,7 +33,7 @@ const MODES: { value: JobMode; label: string; description: string }[] = [
   }
 ];
 
-const LLM_MODEL = "gemini-3-flash-preview";
+const LLM_MODEL = "Ollama (local)";
 
 const DIFFICULTIES: JobDifficulty[] = ["easy", "medium", "hard"];
 const STAGE_LABELS: Record<string, string> = {
@@ -44,6 +44,15 @@ const STAGE_LABELS: Record<string, string> = {
   deduping: "убираем повторы",
   exporting: "формируем файл",
   done: "готово"
+};
+
+const metricToNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 };
 
 export default function GenerationPage() {
@@ -198,7 +207,33 @@ export default function GenerationPage() {
   const rawCount = job?.params_json?.number_of_questions;
   const cardsCount = typeof rawCount === "number" ? rawCount : count;
   const apkgName = job?.result_paths?.apkg?.split("/").pop();
-  const chosenModel = LLM_MODEL;
+  const metrics =
+    job?.metrics_json && typeof job.metrics_json === "object"
+      ? (job.metrics_json as Record<string, unknown>)
+      : null;
+  const stageSecondsRaw =
+    metrics?.stage_seconds && typeof metrics.stage_seconds === "object"
+      ? (metrics.stage_seconds as Record<string, unknown>)
+      : null;
+  const llmMetricsRaw =
+    metrics?.agent_metrics &&
+    typeof metrics.agent_metrics === "object" &&
+    (metrics.agent_metrics as Record<string, unknown>).llm &&
+    typeof (metrics.agent_metrics as Record<string, unknown>).llm === "object"
+      ? ((metrics.agent_metrics as Record<string, unknown>).llm as Record<string, unknown>)
+      : null;
+  const metricsProvider = typeof metrics?.llm_provider === "string" ? metrics.llm_provider : null;
+  const metricsModel = typeof metrics?.llm_model === "string" ? metrics.llm_model : null;
+  const llmProvider = typeof llmMetricsRaw?.provider === "string" ? llmMetricsRaw.provider : null;
+  const llmModel = typeof llmMetricsRaw?.model === "string" ? llmMetricsRaw.model : null;
+  const chosenProvider = metricsProvider || llmProvider || "local";
+  const chosenModel = metricsModel || llmModel || LLM_MODEL;
+  const totalElapsedSec = metricToNumber(metrics?.total_elapsed_sec);
+  const throughputQps = metricToNumber(metrics?.throughput_qps_end_to_end);
+  const dedupeRemoved = metricToNumber(metrics?.dedupe_removed);
+  const genStageSec = metricToNumber(stageSecondsRaw?.generating);
+  const llmCalls = metricToNumber(llmMetricsRaw?.calls_total);
+  const llmLatencyAvgSec = metricToNumber(llmMetricsRaw?.latency_avg_sec);
   const statusTitle =
     job?.status === "done"
       ? "Готово ✅"
@@ -216,7 +251,7 @@ export default function GenerationPage() {
       lowered.includes("embed_content") ||
       lowered.includes("embedding")
     ) {
-      return "Квота эмбеддингов Gemini исчерпана. Запусти повтор или отключи embeddings.";
+      return "Квота эмбеддингов исчерпана. Запусти повтор или отключи embeddings.";
     }
     if (lowered.includes("network connection lost") || lowered.includes("502") || lowered.includes("gateway")) {
       return "Сетевая ошибка у провайдера LLM. Подожди минуту и повтори.";
@@ -231,7 +266,7 @@ export default function GenerationPage() {
       return "Ошибка у провайдера модели. Попробуй повторить позже или сменить модель.";
     }
     if (lowered.includes("generate_content") || lowered.includes("generate") || lowered.includes("quota")) {
-      return "Квота Gemini на генерацию исчерпана. Подожди и повтори, либо используй другой API‑ключ/модель.";
+      return "Квота генерации у провайдера исчерпана. Подожди и повтори, либо смени модель.";
     }
     return message;
   };
@@ -330,8 +365,8 @@ export default function GenerationPage() {
           <div className="field-label">Модель генерации</div>
           <div className="segmented segmented-vertical">
             <button className="segment active" type="button">
-              <div className="segment-title">Gemini 2.5 Flash Lite</div>
-              <div className="segment-subtitle">Бесплатная версия</div>
+              <div className="segment-title">Локальная через Ollama</div>
+              <div className="segment-subtitle">Лёгкая модель, ускорение на GPU/Metal</div>
             </button>
           </div>
         </div>
@@ -392,6 +427,46 @@ export default function GenerationPage() {
                 <span className="muted">Модель</span>
                 <span>{chosenModel}</span>
               </div>
+              <div className="summary-row">
+                <span className="muted">Провайдер</span>
+                <span>{chosenProvider}</span>
+              </div>
+              {totalElapsedSec !== null && (
+                <div className="summary-row">
+                  <span className="muted">Время (E2E)</span>
+                  <span>{totalElapsedSec.toFixed(2)} сек</span>
+                </div>
+              )}
+              {genStageSec !== null && (
+                <div className="summary-row">
+                  <span className="muted">Генерация</span>
+                  <span>{genStageSec.toFixed(2)} сек</span>
+                </div>
+              )}
+              {throughputQps !== null && (
+                <div className="summary-row">
+                  <span className="muted">Скорость</span>
+                  <span>{throughputQps.toFixed(2)} вопросов/сек</span>
+                </div>
+              )}
+              {llmCalls !== null && (
+                <div className="summary-row">
+                  <span className="muted">LLM вызовов</span>
+                  <span>{Math.round(llmCalls)}</span>
+                </div>
+              )}
+              {llmLatencyAvgSec !== null && (
+                <div className="summary-row">
+                  <span className="muted">LLM avg latency</span>
+                  <span>{(llmLatencyAvgSec * 1000).toFixed(0)} мс</span>
+                </div>
+              )}
+              {dedupeRemoved !== null && (
+                <div className="summary-row">
+                  <span className="muted">Удалено дублей</span>
+                  <span>{Math.max(0, Math.round(dedupeRemoved))}</span>
+                </div>
+              )}
               {apkgName && (
                 <div className="summary-row">
                   <span className="muted">Файл</span>
