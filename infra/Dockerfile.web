@@ -1,9 +1,12 @@
 FROM node:20-alpine
 
+ENV NODE_ENV=development
+
 WORKDIR /app/web
 
 COPY web/package.json web/package-lock.json* /app/web/
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --fund=false; else npm install --no-audit --fund=false; fi \
+    && npm cache clean --force
 
 COPY web /app/web
 
