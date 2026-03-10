@@ -1,3 +1,5 @@
+name: ${STACK_NAME:-tg_anki}
+
 services:
   postgres:
     image: postgres:15
