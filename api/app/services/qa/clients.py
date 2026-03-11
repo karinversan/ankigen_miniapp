@@ -496,7 +496,14 @@ def invoke(
 ) -> str:
     last: Exception | None = None
     retry_re = re.compile(r"retry(?:_delay)?[^0-9]*([0-9]+(?:\\.[0-9]+)?)", re.IGNORECASE)
-    for attempt in range(attempts):
+    provider = str(getattr(llm, "provider", "") or "").strip().lower()
+    effective_attempts = max(1, attempts)
+    total_retry_budget_sec: float | None = None
+    if provider == "openrouter":
+        effective_attempts = min(effective_attempts, 3)
+        total_retry_budget_sec = max(30.0, float(settings.openrouter_request_timeout_seconds) * 1.5)
+    started_total = time.perf_counter()
+    for attempt in range(effective_attempts):
         if _should_cancel(should_cancel):
             return ""
         started = time.perf_counter()
@@ -519,7 +526,14 @@ def invoke(
             return response_text
         except Exception as exc:
             last = exc
-            logger.warning("LLM invoke failed: %s", exc)
+            logger.warning(
+                "LLM invoke failed (provider=%s, operation=%s, attempt=%s/%s): %s",
+                provider or "unknown",
+                operation or "default",
+                attempt + 1,
+                effective_attempts,
+                exc,
+            )
             lowered = str(exc).lower()
             if "insufficient credits" in lowered or "payment required" in lowered:
                 break
@@ -540,10 +554,19 @@ def invoke(
             if metrics is not None:
                 llm_metrics = metrics.setdefault("llm", {})
                 llm_metrics["calls_failed"] = int(llm_metrics.get("calls_failed", 0)) + 1
-                if attempt < attempts - 1:
+                if attempt < effective_attempts - 1:
                     llm_metrics["retries_total"] = int(llm_metrics.get("retries_total", 0)) + 1
             if wait_seconds > 0:
                 _sleep_with_cancel(min(wait_seconds, 60.0), should_cancel)
+            if total_retry_budget_sec is not None:
+                elapsed_total = time.perf_counter() - started_total
+                if elapsed_total >= total_retry_budget_sec:
+                    break
         if _should_cancel(should_cancel):
             return ""
-    raise RuntimeError(f"LLM invoke failed after {attempts} attempts: {last}")
+    if total_retry_budget_sec is not None and provider == "openrouter":
+        elapsed_total = time.perf_counter() - started_total
+        raise RuntimeError(
+            f"LLM invoke failed after {effective_attempts} attempts in {elapsed_total:.1f}s: {last}"
+        )
+    raise RuntimeError(f"LLM invoke failed after {effective_attempts} attempts: {last}")
