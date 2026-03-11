@@ -191,6 +191,43 @@ def _round_dict_values(data: dict[str, Any], digits: int = 4) -> dict[str, Any]:
     return rounded
 
 
+def _estimate_generation_seconds(requested_total: int, file_count: int, chunk_count: int) -> float:
+    base = 15.0 + max(1, requested_total) * 2.5 + max(1, file_count) * 4.0
+    chunk_component = min(240.0, max(0, chunk_count) * 0.08)
+    return min(1800.0, base + chunk_component)
+
+
+async def _update_generating_runtime(
+    session: AsyncSession,
+    job: GenerationJob,
+    *,
+    generation_started: float,
+    progress: int,
+    units_done: int,
+    units_total: int,
+    eta_seconds: float | None,
+    mode: str,
+    current_file: str | None = None,
+) -> None:
+    runtime: dict[str, Any] = {
+        "stage": "generating",
+        "mode": mode,
+        "stage_elapsed_sec": round(max(0.0, time.perf_counter() - generation_started), 1),
+        "units_done": max(0, units_done),
+        "units_total": max(1, units_total),
+        "eta_seconds": round(max(0.0, eta_seconds), 1) if eta_seconds is not None else None,
+    }
+    if current_file:
+        runtime["current_file"] = current_file
+    await _update_job(
+        session,
+        job,
+        stage="generating",
+        progress=max(_stage_progress("generating"), min(79, progress)),
+        metrics_json={"runtime": runtime},
+    )
+
+
 def _aggregate_per_file_metrics(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
     if not metrics_list:
         return {}
@@ -386,19 +423,72 @@ async def run_generation_job(job_id: str) -> None:
                     outputs: list[list[dict]] = []
                     per_file_metrics: list[dict[str, Any]] = []
                     per_file_count = max(3, requested_total // max(1, len(file_inputs)))
-                    for file_input in file_inputs:
+                    total_files = max(1, len(file_inputs))
+                    for idx, file_input in enumerate(file_inputs, start=1):
                         if should_cancel():
                             logger.info("Job %s cancelled during generation", job_id)
                             return
-                        per_questions, metrics = generate_questions_for_files(
-                            [file_input],
-                            per_file_count,
-                            difficulty,
-                            should_cancel=should_cancel,
+                        completed = idx - 1
+                        elapsed = time.perf_counter() - generation_started
+                        eta = (elapsed / completed) * (total_files - completed) if completed > 0 else None
+                        progress = 65 + int(14 * (completed / total_files))
+                        await _update_generating_runtime(
+                            session,
+                            job,
+                            generation_started=generation_started,
+                            progress=progress,
+                            units_done=completed,
+                            units_total=total_files,
+                            eta_seconds=eta,
+                            mode=mode,
+                            current_file=file_input.file_name,
                         )
+                        step_task = asyncio.create_task(
+                            asyncio.to_thread(
+                                generate_questions_for_files,
+                                [file_input],
+                                per_file_count,
+                                difficulty,
+                                should_cancel,
+                            )
+                        )
+                        while not step_task.done():
+                            if should_cancel():
+                                logger.info("Job %s cancellation requested during generation step", job_id)
+                            await asyncio.sleep(3)
+                            completed = idx - 1
+                            elapsed = time.perf_counter() - generation_started
+                            eta = (elapsed / completed) * (total_files - completed) if completed > 0 else None
+                            progress = 65 + int(14 * (completed / total_files))
+                            await _update_generating_runtime(
+                                session,
+                                job,
+                                generation_started=generation_started,
+                                progress=progress,
+                                units_done=completed,
+                                units_total=total_files,
+                                eta_seconds=eta,
+                                mode=mode,
+                                current_file=file_input.file_name,
+                            )
+                        per_questions, metrics = await step_task
                         logger.info("Agent metrics (%s): %s", file_input.file_name, metrics)
                         outputs.append(per_questions)
                         per_file_metrics.append(metrics)
+                        elapsed = time.perf_counter() - generation_started
+                        completed = idx
+                        eta = (elapsed / completed) * (total_files - completed) if completed < total_files else 0.0
+                        progress = 65 + int(14 * (completed / total_files))
+                        await _update_generating_runtime(
+                            session,
+                            job,
+                            generation_started=generation_started,
+                            progress=progress,
+                            units_done=completed,
+                            units_total=total_files,
+                            eta_seconds=eta,
+                            mode=mode,
+                        )
                     if should_cancel():
                         logger.info("Job %s cancelled during generation", job_id)
                         return
@@ -407,14 +497,51 @@ async def run_generation_job(job_id: str) -> None:
                     generation_metrics["mode"] = "per_file"
                     generation_metrics["per_file_jobs"] = len(per_file_metrics)
                 else:
-                    questions, generation_metrics = generate_questions_for_files(
-                        file_inputs,
-                        requested_total,
-                        difficulty,
-                        should_cancel=should_cancel,
+                    estimated_generation_sec = _estimate_generation_seconds(
+                        requested_total=requested_total,
+                        file_count=len(file_inputs),
+                        chunk_count=int(chunk_stats.get("chunk_count", 0)),
                     )
+                    merge_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            generate_questions_for_files,
+                            file_inputs,
+                            requested_total,
+                            difficulty,
+                            should_cancel,
+                        )
+                    )
+                    while not merge_task.done():
+                        if should_cancel():
+                            logger.info("Job %s cancellation requested during merged generation", job_id)
+                        await asyncio.sleep(3)
+                        elapsed = time.perf_counter() - generation_started
+                        ratio = min(1.0, elapsed / max(estimated_generation_sec, 1e-9))
+                        progress = 65 + int(14 * ratio)
+                        eta = max(0.0, estimated_generation_sec - elapsed)
+                        await _update_generating_runtime(
+                            session,
+                            job,
+                            generation_started=generation_started,
+                            progress=progress,
+                            units_done=int(requested_total * ratio),
+                            units_total=max(1, requested_total),
+                            eta_seconds=eta,
+                            mode=mode,
+                        )
+                    questions, generation_metrics = await merge_task
                     logger.info("Agent metrics: %s", generation_metrics)
                     generation_metrics["mode"] = "merged"
+                    await _update_generating_runtime(
+                        session,
+                        job,
+                        generation_started=generation_started,
+                        progress=79,
+                        units_done=max(1, requested_total),
+                        units_total=max(1, requested_total),
+                        eta_seconds=0.0,
+                        mode=mode,
+                    )
                 stage_seconds["generating"] = time.perf_counter() - generation_started
 
                 if await _is_cancelled(session, job):

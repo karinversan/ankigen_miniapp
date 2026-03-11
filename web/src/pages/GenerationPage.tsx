@@ -55,6 +55,14 @@ const metricToNumber = (value: unknown): number | null => {
   return null;
 };
 
+const formatDurationShort = (seconds: number): string => {
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  if (minutes <= 0) return `${secs}с`;
+  return `${minutes}м ${secs}с`;
+};
+
 export default function GenerationPage() {
   const { topicId } = useParams();
   const navigate = useNavigate();
@@ -234,6 +242,14 @@ export default function GenerationPage() {
   const genStageSec = metricToNumber(stageSecondsRaw?.generating);
   const llmCalls = metricToNumber(llmMetricsRaw?.calls_total);
   const llmLatencyAvgSec = metricToNumber(llmMetricsRaw?.latency_avg_sec);
+  const runtimeRaw =
+    metrics?.runtime && typeof metrics.runtime === "object"
+      ? (metrics.runtime as Record<string, unknown>)
+      : null;
+  const runtimeEtaSec = metricToNumber(runtimeRaw?.eta_seconds);
+  const runtimeStageElapsedSec = metricToNumber(runtimeRaw?.stage_elapsed_sec);
+  const runtimeUnitsDone = metricToNumber(runtimeRaw?.units_done);
+  const runtimeUnitsTotal = metricToNumber(runtimeRaw?.units_total);
   const statusTitle =
     job?.status === "done"
       ? "Готово ✅"
@@ -271,16 +287,31 @@ export default function GenerationPage() {
     return message;
   };
 
-  const statusSubtitle =
-    job?.status === "queued"
-      ? "В очереди"
-      : job?.status === "running"
-      ? `Этап: ${STAGE_LABELS[job.stage] || job.stage}`
-      : job?.status === "failed"
-      ? formatJobError(job?.error_message)
-      : job?.status === "cancelled"
-      ? "Генерация остановлена"
-      : "";
+  let statusSubtitle = "";
+  if (job?.status === "queued") {
+    statusSubtitle = "В очереди";
+  } else if (job?.status === "running") {
+    const base = `Этап: ${STAGE_LABELS[job.stage] || job.stage}`;
+    if (job.stage === "generating") {
+      const parts = [base];
+      if (runtimeUnitsDone !== null && runtimeUnitsTotal !== null && runtimeUnitsTotal > 0) {
+        parts.push(`Прогресс: ${Math.min(runtimeUnitsDone, runtimeUnitsTotal)}/${runtimeUnitsTotal}`);
+      }
+      if (runtimeEtaSec !== null) {
+        parts.push(`Оценка: ~${formatDurationShort(runtimeEtaSec)}`);
+      }
+      if (runtimeStageElapsedSec !== null) {
+        parts.push(`Прошло: ${formatDurationShort(runtimeStageElapsedSec)}`);
+      }
+      statusSubtitle = parts.join(" · ");
+    } else {
+      statusSubtitle = base;
+    }
+  } else if (job?.status === "failed") {
+    statusSubtitle = formatJobError(job?.error_message);
+  } else if (job?.status === "cancelled") {
+    statusSubtitle = "Генерация остановлена";
+  }
 
   return (
     <div className="page">
