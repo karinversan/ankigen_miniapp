@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import GenerationJob
 
+_TERMINAL_STATUSES = ("done", "failed", "cancelled")
+
 
 def to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -52,6 +54,12 @@ def summarize(values: Iterable[float]) -> dict[str, float]:
     }
 
 
+def ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
 def fmt(stat: dict[str, float], unit: str) -> str:
     if not stat:
         return "n/a"
@@ -64,21 +72,80 @@ def fmt(stat: dict[str, float], unit: str) -> str:
     )
 
 
-def bucket_files_count(value: float) -> str:
-    count = int(value)
-    if count <= 1:
-        return "1 file"
-    if count <= 3:
-        return "2-3 files"
-    if count <= 5:
-        return "4-5 files"
-    return "6+ files"
+def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
+    n = len(vector)
+    if n == 0 or len(matrix) != n or any(len(row) != n for row in matrix):
+        return None
+    aug = [row[:] + [vector[idx]] for idx, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot][col]) < 1e-10:
+            return None
+        if pivot != col:
+            aug[col], aug[pivot] = aug[pivot], aug[col]
+        scale = aug[col][col]
+        for k in range(col, n + 1):
+            aug[col][k] /= scale
+        for row in range(n):
+            if row == col:
+                continue
+            factor = aug[row][col]
+            if factor == 0:
+                continue
+            for k in range(col, n + 1):
+                aug[row][k] -= factor * aug[col][k]
+    return [aug[i][n] for i in range(n)]
+
+
+def fit_complexity_model(samples: list[tuple[float, float, float, float]]) -> dict[str, Any]:
+    # y ~ b0 + b1*chars_k + b2*files + b3*questions
+    if len(samples) < 6:
+        return {"sample_count": len(samples), "ready": False}
+    x_rows: list[list[float]] = []
+    y_vals: list[float] = []
+    for y, chars_k, files, questions in samples:
+        x_rows.append([1.0, chars_k, files, questions])
+        y_vals.append(y)
+
+    dim = 4
+    xtx = [[0.0 for _ in range(dim)] for _ in range(dim)]
+    xty = [0.0 for _ in range(dim)]
+    for row, y in zip(x_rows, y_vals):
+        for i in range(dim):
+            xty[i] += row[i] * y
+            for j in range(dim):
+                xtx[i][j] += row[i] * row[j]
+
+    coeffs = _solve_linear_system(xtx, xty)
+    if coeffs is None:
+        return {"sample_count": len(samples), "ready": False}
+
+    predictions = [
+        coeffs[0] + coeffs[1] * row[1] + coeffs[2] * row[2] + coeffs[3] * row[3]
+        for row in x_rows
+    ]
+    y_mean = mean(y_vals)
+    ss_res = sum((y - y_hat) ** 2 for y, y_hat in zip(y_vals, predictions))
+    ss_tot = sum((y - y_mean) ** 2 for y in y_vals)
+    r2 = 1.0 - ratio(ss_res, ss_tot) if ss_tot > 1e-12 else 0.0
+    return {
+        "sample_count": len(samples),
+        "ready": True,
+        "formula": "time_sec ~= b0 + b1*chars_k + b2*files + b3*questions",
+        "coefficients": {
+            "b0": round(coeffs[0], 6),
+            "b1_chars_k": round(coeffs[1], 6),
+            "b2_files": round(coeffs[2], 6),
+            "b3_questions": round(coeffs[3], 6),
+        },
+        "r2": round(r2, 6),
+    }
 
 
 async def fetch_jobs(session: AsyncSession, limit: int) -> list[GenerationJob]:
     stmt = (
         select(GenerationJob)
-        .where(GenerationJob.status == "done", GenerationJob.metrics_json.is_not(None))
+        .where(GenerationJob.status.in_(_TERMINAL_STATUSES))
         .order_by(desc(GenerationJob.created_at))
         .limit(limit)
     )
@@ -89,36 +156,41 @@ async def fetch_jobs(session: AsyncSession, limit: int) -> list[GenerationJob]:
 def build_report(jobs: list[GenerationJob]) -> tuple[dict[str, Any], str]:
     providers = Counter()
     models = Counter()
+
+    terminal_jobs = len(jobs)
+    done_jobs = 0
+    failed_jobs = 0
+    cancelled_jobs = 0
+    rate_limited_failures = 0
+
     e2e_seconds: list[float] = []
-    generation_qps: list[float] = []
-    e2e_qps: list[float] = []
-    llm_latency_ms: list[float] = []
-    llm_calls: list[float] = []
-    dedupe_removed: list[float] = []
-    coverage_ratio: list[float] = []
-    quality_score: list[float] = []
-    source_coverage_ratio: list[float] = []
-    unique_source_count: list[float] = []
-    question_uniqueness_ratio: list[float] = []
-    extracting_sec: list[float] = []
-    chunking_sec: list[float] = []
-    generating_sec: list[float] = []
-    deduping_sec: list[float] = []
-    exporting_sec: list[float] = []
     sec_per_question: list[float] = []
     sec_per_1k_chars: list[float] = []
-    chars_per_sec: list[float] = []
-    files_bucket_e2e: dict[str, list[float]] = {
-        "1 file": [],
-        "2-3 files": [],
-        "4-5 files": [],
-        "6+ files": [],
-    }
+    quality_score: list[float] = []
+    source_coverage_ratio: list[float] = []
+    duplicate_rate: list[float] = []
+    retries_per_job: list[float] = []
+    failed_calls_per_job: list[float] = []
+    complexity_samples: list[tuple[float, float, float, float]] = []
 
     for job in jobs:
+        status = (job.status or "").strip().lower()
+        if status == "done":
+            done_jobs += 1
+        elif status == "failed":
+            failed_jobs += 1
+        elif status == "cancelled":
+            cancelled_jobs += 1
+
+        if status == "failed":
+            msg = (job.error_message or "").lower()
+            if "429" in msg or "rate limit" in msg:
+                rate_limited_failures += 1
+
         data = job.metrics_json or {}
         if not isinstance(data, dict):
             continue
+
         provider = data.get("llm_provider")
         if isinstance(provider, str) and provider:
             providers[provider] += 1
@@ -126,145 +198,115 @@ def build_report(jobs: list[GenerationJob]) -> tuple[dict[str, Any], str]:
         if isinstance(model, str) and model:
             models[model] += 1
 
-        value = to_float(data.get("total_elapsed_sec"))
-        if value is not None:
-            e2e_seconds.append(value)
-        value = to_float(data.get("throughput_qps_end_to_end"))
-        if value is not None:
-            e2e_qps.append(value)
-        value = to_float(data.get("throughput_qps_generation"))
-        if value is not None:
-            generation_qps.append(value)
-        value = to_float(data.get("dedupe_removed"))
-        if value is not None:
-            dedupe_removed.append(value)
-        value = to_float(data.get("coverage_ratio"))
-        if value is not None:
-            coverage_ratio.append(value)
-        value = to_float(data.get("quality_score"))
-        if value is not None:
-            quality_score.append(value)
-        value = to_float(data.get("source_coverage_ratio"))
-        if value is not None:
-            source_coverage_ratio.append(value)
-        value = to_float(data.get("unique_source_count"))
-        if value is not None:
-            unique_source_count.append(value)
-        value = to_float(data.get("question_uniqueness_ratio"))
-        if value is not None:
-            question_uniqueness_ratio.append(value)
+        if status != "done":
+            continue
 
         total_elapsed = to_float(data.get("total_elapsed_sec"))
         final_questions = to_float(data.get("final_questions"))
         input_text_chars_total = to_float(data.get("input_text_chars_total"))
         input_files = to_float(data.get("input_files"))
+        requested_questions = to_float(data.get("requested_questions"))
+        dedupe_removed = to_float(data.get("dedupe_removed"))
+        generated_before = to_float(data.get("generated_questions_before_dedupe"))
+
+        if total_elapsed is not None:
+            e2e_seconds.append(total_elapsed)
         if total_elapsed is not None and final_questions and final_questions > 0:
             sec_per_question.append(total_elapsed / final_questions)
         if total_elapsed is not None and input_text_chars_total and input_text_chars_total > 0:
-            sec_per_1k_chars.append(total_elapsed / (input_text_chars_total / 1000.0))
-            chars_per_sec.append(input_text_chars_total / total_elapsed)
-        if total_elapsed is not None and input_files is not None and input_files > 0:
-            files_bucket_e2e[bucket_files_count(input_files)].append(total_elapsed)
+            chars_k = input_text_chars_total / 1000.0
+            sec_per_1k_chars.append(total_elapsed / chars_k)
+            if input_files and requested_questions and requested_questions > 0:
+                complexity_samples.append((total_elapsed, chars_k, input_files, requested_questions))
 
-        stage_seconds = data.get("stage_seconds")
-        if isinstance(stage_seconds, dict):
-            value = to_float(stage_seconds.get("extracting"))
-            if value is not None:
-                extracting_sec.append(value)
-            value = to_float(stage_seconds.get("chunking"))
-            if value is not None:
-                chunking_sec.append(value)
-            value = to_float(stage_seconds.get("generating"))
-            if value is not None:
-                generating_sec.append(value)
-            value = to_float(stage_seconds.get("deduping"))
-            if value is not None:
-                deduping_sec.append(value)
-            value = to_float(stage_seconds.get("exporting"))
-            if value is not None:
-                exporting_sec.append(value)
+        quality = to_float(data.get("quality_score"))
+        if quality is not None:
+            quality_score.append(quality)
+        source_cov = to_float(data.get("source_coverage_ratio"))
+        if source_cov is not None:
+            source_coverage_ratio.append(source_cov)
+        if dedupe_removed is not None and generated_before and generated_before > 0:
+            duplicate_rate.append(dedupe_removed / generated_before)
 
-        llm = None
         agent_metrics = data.get("agent_metrics")
-        if isinstance(agent_metrics, dict):
-            llm_val = agent_metrics.get("llm")
-            if isinstance(llm_val, dict):
-                llm = llm_val
-        if llm:
-            value = to_float(llm.get("latency_avg_sec"))
-            if value is not None:
-                llm_latency_ms.append(value * 1000.0)
-            value = to_float(llm.get("calls_total"))
-            if value is not None:
-                llm_calls.append(value)
+        llm = agent_metrics.get("llm") if isinstance(agent_metrics, dict) else None
+        if isinstance(llm, dict):
+            retries = to_float(llm.get("retries_total"))
+            failed_calls = to_float(llm.get("calls_failed"))
+            if retries is not None:
+                retries_per_job.append(retries)
+            if failed_calls is not None:
+                failed_calls_per_job.append(failed_calls)
+
+    completion_rate = ratio(done_jobs, terminal_jobs)
+    failed_rate = ratio(failed_jobs, terminal_jobs)
+    cancelled_rate = ratio(cancelled_jobs, terminal_jobs)
+    rate_limited_failure_rate = ratio(rate_limited_failures, max(1, failed_jobs))
+    complexity_model = fit_complexity_model(complexity_samples)
 
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "jobs_analyzed": len(jobs),
+        "terminal_jobs": terminal_jobs,
+        "done_jobs": done_jobs,
+        "failed_jobs": failed_jobs,
+        "cancelled_jobs": cancelled_jobs,
+        "completion_rate": round(completion_rate, 6),
+        "failed_rate": round(failed_rate, 6),
+        "cancelled_rate": round(cancelled_rate, 6),
+        "rate_limited_failure_rate": round(rate_limited_failure_rate, 6),
         "providers": dict(providers),
         "models": dict(models),
         "e2e_seconds": summarize(e2e_seconds),
-        "e2e_qps": summarize(e2e_qps),
-        "generation_qps": summarize(generation_qps),
-        "llm_latency_ms": summarize(llm_latency_ms),
-        "llm_calls": summarize(llm_calls),
-        "dedupe_removed": summarize(dedupe_removed),
-        "coverage_ratio": summarize(coverage_ratio),
-        "quality_score": summarize(quality_score),
-        "source_coverage_ratio": summarize(source_coverage_ratio),
-        "unique_source_count": summarize(unique_source_count),
-        "question_uniqueness_ratio": summarize(question_uniqueness_ratio),
         "sec_per_question": summarize(sec_per_question),
         "sec_per_1k_chars": summarize(sec_per_1k_chars),
-        "chars_per_sec": summarize(chars_per_sec),
-        "e2e_by_files_bucket": {bucket: summarize(values) for bucket, values in files_bucket_e2e.items()},
-        "stage_extracting_sec": summarize(extracting_sec),
-        "stage_chunking_sec": summarize(chunking_sec),
-        "stage_generating_sec": summarize(generating_sec),
-        "stage_deduping_sec": summarize(deduping_sec),
-        "stage_exporting_sec": summarize(exporting_sec),
+        "quality_score": summarize(quality_score),
+        "source_coverage_ratio": summarize(source_coverage_ratio),
+        "duplicate_rate": summarize(duplicate_rate),
+        "retries_per_job": summarize(retries_per_job),
+        "failed_calls_per_job": summarize(failed_calls_per_job),
+        "complexity_model": complexity_model,
     }
 
-    markdown = "\n".join(
-        [
-            "# Generation Metrics Report",
-            f"- Generated (UTC): {summary['generated_at']}",
-            f"- Jobs analyzed: {summary['jobs_analyzed']}",
-            f"- Providers: {summary['providers']}",
-            f"- Models: {summary['models']}",
-            "",
-            "## Throughput",
-            f"- End-to-end time: {fmt(summary['e2e_seconds'], 's')}",
-            f"- End-to-end speed: {fmt(summary['e2e_qps'], ' q/s')}",
-            f"- Generation speed: {fmt(summary['generation_qps'], ' q/s')}",
-            f"- Seconds per question: {fmt(summary['sec_per_question'], 's')}",
-            f"- Seconds per 1k input chars: {fmt(summary['sec_per_1k_chars'], 's')}",
-            f"- Input chars/sec: {fmt(summary['chars_per_sec'], ' chars/s')}",
-            "",
-            "## LLM",
-            f"- Calls per job: {fmt(summary['llm_calls'], '')}",
-            f"- Avg LLM latency: {fmt(summary['llm_latency_ms'], 'ms')}",
-            "",
-            "## Quality",
-            f"- Dedupe removed: {fmt(summary['dedupe_removed'], '')}",
-            f"- Coverage ratio: {fmt(summary['coverage_ratio'], '')}",
-            f"- Quality score: {fmt(summary['quality_score'], '')}",
-            f"- Source coverage ratio: {fmt(summary['source_coverage_ratio'], '')}",
-            f"- Unique source count: {fmt(summary['unique_source_count'], '')}",
-            f"- Question uniqueness ratio: {fmt(summary['question_uniqueness_ratio'], '')}",
-            "",
-            "## Stage Times",
-            f"- Extracting: {fmt(summary['stage_extracting_sec'], 's')}",
-            f"- Chunking: {fmt(summary['stage_chunking_sec'], 's')}",
-            f"- Generating: {fmt(summary['stage_generating_sec'], 's')}",
-            f"- Deduping: {fmt(summary['stage_deduping_sec'], 's')}",
-            f"- Exporting: {fmt(summary['stage_exporting_sec'], 's')}",
-            "",
-            "## E2E By File Count",
-            f"- 1 file: {fmt(summary['e2e_by_files_bucket']['1 file'], 's')}",
-            f"- 2-3 files: {fmt(summary['e2e_by_files_bucket']['2-3 files'], 's')}",
-            f"- 4-5 files: {fmt(summary['e2e_by_files_bucket']['4-5 files'], 's')}",
-            f"- 6+ files: {fmt(summary['e2e_by_files_bucket']['6+ files'], 's')}",
-        ]
-    )
+    markdown_lines = [
+        "# Generation Metrics Report",
+        f"- Generated (UTC): {summary['generated_at']}",
+        f"- Jobs analyzed: {summary['jobs_analyzed']}",
+        f"- Providers: {summary['providers']}",
+        f"- Models: {summary['models']}",
+        "",
+        "## Success & Reliability",
+        f"- Completion rate: {summary['completion_rate'] * 100:.1f}%",
+        f"- Failed rate: {summary['failed_rate'] * 100:.1f}%",
+        f"- Cancelled rate: {summary['cancelled_rate'] * 100:.1f}%",
+        f"- Rate-limited failures among failed: {summary['rate_limited_failure_rate'] * 100:.1f}%",
+        f"- Retries per job: {fmt(summary['retries_per_job'], '')}",
+        f"- Failed LLM calls per job: {fmt(summary['failed_calls_per_job'], '')}",
+        "",
+        "## Speed",
+        f"- Time-to-value (E2E): {fmt(summary['e2e_seconds'], 's')}",
+        f"- Seconds per question: {fmt(summary['sec_per_question'], 's')}",
+        f"- Seconds per 1k chars: {fmt(summary['sec_per_1k_chars'], 's')}",
+        "",
+        "## Quality",
+        f"- Quality score: {fmt(summary['quality_score'], '')}",
+        f"- Source coverage ratio: {fmt(summary['source_coverage_ratio'], '')}",
+        f"- Duplicate rate: {fmt(summary['duplicate_rate'], '')}",
+        "",
+        "## Complexity Model",
+    ]
+    if complexity_model.get("ready"):
+        coeffs = complexity_model.get("coefficients", {})
+        markdown_lines.append(f"- Formula: {complexity_model['formula']}")
+        markdown_lines.append(f"- Samples: {complexity_model['sample_count']}")
+        markdown_lines.append(f"- R2: {complexity_model.get('r2')}")
+        markdown_lines.append(f"- b0: {coeffs.get('b0')}")
+        markdown_lines.append(f"- b1 (chars_k): {coeffs.get('b1_chars_k')}")
+        markdown_lines.append(f"- b2 (files): {coeffs.get('b2_files')}")
+        markdown_lines.append(f"- b3 (questions): {coeffs.get('b3_questions')}")
+    else:
+        markdown_lines.append(
+            f"- Not enough data to fit model (samples={complexity_model.get('sample_count', 0)}; need >= 6)."
+        )
+    markdown = "\n".join(markdown_lines)
     return summary, markdown
