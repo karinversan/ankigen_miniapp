@@ -52,6 +52,10 @@ openssl rand -base64 32
 ```
 
 If Ollama is not on the same host, use remote provider (`LLM_PROVIDER=gemini`) or point `OLLAMA_BASE_URL` to reachable endpoint.
+You can also use OpenRouter as remote LLM:
+- `LLM_PROVIDER=openrouter`
+- `OPENROUTER_API_KEY=<api-key>`
+- `OPENROUTER_MODEL=qwen/qwen3-8b:free`
 
 `STACK_NAME` must be unique per project on one server, so Docker object names (`network`, `volumes`, containers) do not collide.
 

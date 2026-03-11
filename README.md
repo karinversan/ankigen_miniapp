@@ -233,6 +233,13 @@ ollama pull qwen2.5:3b-instruct-q4_K_M
 - `OLLAMA_BASE_URL=http://host.docker.internal:11434` (для Docker сервисов `api/worker`)
 - `OLLAMA_NUM_GPU=-1` (автовыбор; на macOS Ollama использует Metal автоматически)
 
+### Облачная модель (OpenRouter)
+Если локальный Ollama недоступен на сервере, можно переключить генерацию на OpenRouter:
+- `LLM_PROVIDER=openrouter`
+- `OPENROUTER_API_KEY=<your-api-key>`
+- `OPENROUTER_MODEL=qwen/qwen3-8b:free` (или любой совместимый JSON-friendly model)
+- `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`
+
 Если используешь uv локально:
 ```bash
 uv run ruff check .
@@ -274,6 +281,9 @@ celery -A worker.app.celery_app worker -l info
 - `LLM_PROVIDER=ollama` — локальная генерация через Ollama
 - `LOCAL_LLM_MODEL=qwen2.5:3b-instruct-q4_K_M` — лёгкая модель по умолчанию
 - `OLLAMA_BASE_URL=http://host.docker.internal:11434` — URL Ollama для контейнеров
+- `LLM_PROVIDER=openrouter` — генерация через OpenRouter API
+- `OPENROUTER_API_KEY` — ключ OpenRouter (если выбран `openrouter`)
+- `OPENROUTER_MODEL` — модель OpenRouter, например `qwen/qwen3-8b:free`
 - `GEMINI_API_KEY` — только если используешь `LLM_PROVIDER=gemini`
 - `RAG_USE_EMBEDDINGS=true` включает embeddings
 - `EMBEDDING_PROVIDER=local` для локальных эмбеддингов
