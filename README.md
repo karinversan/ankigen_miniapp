@@ -276,6 +276,7 @@ celery -A worker.app.celery_app worker -l info
 - `BOT_TOKEN` — токен Telegram‑бота
 - `JWT_SECRET` — секрет для JWT
 - `ENCRYPTION_KEY_BASE64` — 32 байта (AES‑GCM)
+- `ADMIN_TELEGRAM_IDS` — список Telegram ID админов через запятую (например, `123456789`)
 
 Дополнительно:
 - `LLM_PROVIDER=ollama` — локальная генерация через Ollama
@@ -292,6 +293,9 @@ celery -A worker.app.celery_app worker -l info
 - `JOB_CHUNK_CONCURRENCY=4` — параллелизм chunking
 
 ## Метрики и бенчмарк
+В Mini App для админа доступна кнопка `Считать метрики` (только если ваш `telegram_id` есть в `ADMIN_TELEGRAM_IDS`).
+Она запускает backend-расчёт отчёта и даёт скачивание файлов `JSON/MD` прямо из интерфейса.
+
 Для контрольного end-to-end прогона (создать тему -> загрузить файл -> запустить генерацию -> дождаться результата -> собрать метрики):
 
 ```bash
