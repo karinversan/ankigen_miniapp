@@ -516,16 +516,20 @@ async def run_generation_job(job_id: str) -> None:
                             logger.info("Job %s cancellation requested during merged generation", job_id)
                         await asyncio.sleep(3)
                         elapsed = time.perf_counter() - generation_started
-                        ratio = min(1.0, elapsed / max(estimated_generation_sec, 1e-9))
+                        # Keep runtime progress below 100% until generation is actually complete.
+                        ratio = min(0.95, elapsed / max(estimated_generation_sec, 1e-9))
                         progress = 65 + int(14 * ratio)
                         eta = max(0.0, estimated_generation_sec - elapsed)
+                        units_total = max(1, requested_total)
+                        units_done_estimate = int(requested_total * ratio)
+                        units_done = min(max(0, units_total - 1), units_done_estimate)
                         await _update_generating_runtime(
                             session,
                             job,
                             generation_started=generation_started,
                             progress=progress,
-                            units_done=int(requested_total * ratio),
-                            units_total=max(1, requested_total),
+                            units_done=units_done,
+                            units_total=units_total,
                             eta_seconds=eta,
                             mode=mode,
                         )
