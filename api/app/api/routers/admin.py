@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,7 @@ from app.core.config import settings
 from app.db.models import User
 from app.db.session import get_session
 from app.services.metrics_report import build_report, fetch_jobs
+from app.services.telegram_delivery import send_document_to_telegram
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -79,3 +81,27 @@ async def download_metrics_report(
         raise HTTPException(status_code=404, detail="Report not found")
     media_type = "application/json" if normalized == "json" else "text/markdown; charset=utf-8"
     return FileResponse(str(file_path), media_type=media_type, filename=file_path.name)
+
+
+@router.post("/metrics/report/{report_id}/send")
+async def send_metrics_report(
+    report_id: str,
+    format: str = "md",
+    user: User = Depends(get_current_admin),
+) -> dict[str, bool]:
+    normalized = format.strip().lower()
+    if normalized not in {"json", "md"}:
+        raise HTTPException(status_code=400, detail="Unsupported format")
+    file_path = (_reports_dir() / report_id).with_suffix(f".{normalized}")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    caption = f"Metrics report {report_id} ({normalized.upper()})"
+    try:
+        await send_document_to_telegram(chat_id=user.telegram_id, file_path=file_path, caption=caption)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Failed to send report to Telegram") from exc
+
+    return {"ok": True}

@@ -60,3 +60,45 @@ async def test_admin_metrics_report_requires_admin(client, tmp_path):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert download_json.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_metrics_report_send(client, tmp_path, monkeypatch):
+    config.settings.bot_token = "test-bot-token"
+    config.settings.storage_path = str(tmp_path)
+    config.settings.admin_telegram_ids = "101"
+
+    auth = await client.post(
+        "/auth/telegram",
+        json={"init_data": make_init_data(config.settings.bot_token, user_id=101)},
+    )
+    token = auth.json()["access_token"]
+
+    report = await client.post(
+        "/admin/metrics/report",
+        json={"limit": 5},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert report.status_code == 200
+    report_id = report.json()["report_id"]
+
+    sent_payload: dict[str, object] = {}
+
+    async def _fake_send_document_to_telegram(*, chat_id: int, file_path, caption: str) -> None:
+        sent_payload["chat_id"] = chat_id
+        sent_payload["file_path"] = str(file_path)
+        sent_payload["caption"] = caption
+
+    monkeypatch.setattr(
+        "app.api.routers.admin.send_document_to_telegram",
+        _fake_send_document_to_telegram,
+    )
+
+    sent = await client.post(
+        f"/admin/metrics/report/{report_id}/send?format=md",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert sent.status_code == 200
+    assert sent.json() == {"ok": True}
+    assert sent_payload["chat_id"] == 101
+    assert str(sent_payload["file_path"]).endswith(f"{report_id}.md")

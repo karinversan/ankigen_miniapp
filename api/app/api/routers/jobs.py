@@ -11,11 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_job_for_user, get_topic_for_user
-from app.core.config import settings
 from app.db.models import GenerationJob, Topic, User
 from app.db.session import get_session
 from app.schemas.job import JobCreate, JobOut
 from app.services.celery_app import celery_app
+from app.services.telegram_delivery import send_document_to_telegram
 import logging
 from app.services.cache import get_redis
 from app.services.rate_limit import check_rate_limit
@@ -223,13 +223,12 @@ async def send_result(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File missing")
 
-    telegram_url = f"https://api.telegram.org/bot{settings.bot_token}/sendDocument"
     caption = f"Anki package for topic: {topic_id}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        with file_path.open("rb") as handle:
-            files = {"document": (file_path.name, handle, "application/octet-stream")}
-            data = {"chat_id": str(user.telegram_id), "caption": caption}
-            response = await client.post(telegram_url, data=data, files=files)
-            response.raise_for_status()
+    try:
+        await send_document_to_telegram(chat_id=user.telegram_id, file_path=file_path, caption=caption)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Failed to send file to Telegram") from exc
 
     return {"ok": True}
