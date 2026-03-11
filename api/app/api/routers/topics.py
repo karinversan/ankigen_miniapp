@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_topic_for_user
@@ -31,7 +31,10 @@ async def list_topics(
 
     stmt = (
         select(Topic, func.count(FileRecord.id))
-        .outerjoin(FileRecord, FileRecord.topic_id == Topic.id)
+        .outerjoin(
+            FileRecord,
+            and_(FileRecord.topic_id == Topic.id, FileRecord.deleted_at.is_(None)),
+        )
         .where(Topic.user_id == user.id)
         .group_by(Topic.id)
         .order_by(Topic.created_at.desc())
@@ -120,5 +123,11 @@ async def update_topic(
         title=topic.title,
         created_at=topic.created_at,
         updated_at=topic.updated_at,
-        file_count=await session.scalar(select(func.count(FileRecord.id)).where(FileRecord.topic_id == topic.id)) or 0,
+        file_count=await session.scalar(
+            select(func.count(FileRecord.id)).where(
+                FileRecord.topic_id == topic.id,
+                FileRecord.deleted_at.is_(None),
+            )
+        )
+        or 0,
     )

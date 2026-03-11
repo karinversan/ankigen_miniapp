@@ -98,6 +98,10 @@ async def upload_file(
     session.add(record)
     await session.commit()
     await session.refresh(record)
+    try:
+        await get_redis().delete(f"topics:{user.id}")
+    except Exception:
+        pass
     return FileOut.model_validate(record)
 
 
@@ -106,9 +110,14 @@ async def delete_file_record(
     topic_id: UUID,
     file_id: UUID,
     record: FileRecord = Depends(get_file_for_user),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     delete_file(record.storage_path)
     record.deleted_at = datetime.utcnow()
     await session.commit()
+    try:
+        await get_redis().delete(f"topics:{user.id}")
+    except Exception:
+        pass
     return {"status": "deleted"}
