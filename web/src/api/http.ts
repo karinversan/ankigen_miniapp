@@ -1,4 +1,5 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+const REQUEST_TIMEOUT_MS = 15000;
 
 let token: string | null =
   typeof window !== "undefined" ? window.localStorage.getItem("tg_anki_token") : null;
@@ -20,7 +21,24 @@ export async function request<T>(
 ): Promise<T> {
   const { fallbackError = "Request failed", ...init } = options;
   const headers = { ...authHeaders(), ...(init.headers || {}) } as Record<string, string>;
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abortListener = () => controller.abort();
+  init.signal?.addEventListener("abort", abortListener, { once: true });
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Request timeout. Check API domain/port routing in Dokploy.");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", abortListener);
+  }
+
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(detail || fallbackError);
