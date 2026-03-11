@@ -157,3 +157,10 @@ export async function downloadAdminMetricsReport(reportId: string, format: "json
   link.remove();
   window.URL.revokeObjectURL(url);
 }
+
+export function sendAdminMetricsReport(reportId: string, format: "json" | "md" = "md"): Promise<void> {
+  return request(`/admin/metrics/report/${reportId}/send?format=${encodeURIComponent(format)}`, {
+    method: "POST",
+    fallbackError: "Failed to send metrics report"
+  });
+}

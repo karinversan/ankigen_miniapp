@@ -10,6 +10,7 @@ type TelegramWebApp = {
   themeParams?: TelegramThemeParams;
   ready?: () => void;
   expand?: () => void;
+  close?: () => void;
   onEvent?: (event: string, cb: () => void) => void;
   offEvent?: (event: string, cb: () => void) => void;
   HapticFeedback?: {

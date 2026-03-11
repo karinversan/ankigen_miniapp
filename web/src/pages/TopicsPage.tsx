@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { createTopic, deleteTopic, listTopics, updateTopic, Topic } from "../api/client";
+import { authMe, createTopic, deleteTopic, listTopics, updateTopic, Topic } from "../api/client";
 import { useNavigate } from "react-router-dom";
 import { getWebApp } from "../telegram";
 import { useAutoDismiss } from "../hooks/useAutoDismiss";
@@ -16,6 +16,7 @@ export default function TopicsPage() {
   const [menuTarget, setMenuTarget] = useState<Topic | null>(null);
   const [renameTarget, setRenameTarget] = useState<Topic | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [notice, setNotice] = useAutoDismiss<string>(null);
   const navigate = useNavigate();
 
@@ -34,6 +35,18 @@ export default function TopicsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const loadMe = async () => {
+      try {
+        const me = await authMe();
+        setIsAdmin(Boolean(me.is_admin));
+      } catch {
+        setIsAdmin(false);
+      }
+    };
+    loadMe();
+  }, []);
 
   const onAddTopic = async () => {
     if (!newTitle.trim()) return;
@@ -93,9 +106,16 @@ export default function TopicsPage() {
           <h1>Темы</h1>
           <p className="page-subtitle">Организуйте источники и создавайте Anki-колоды.</p>
         </div>
-        <button className="primary" onClick={() => setIsAddOpen(true)}>
-          + Создать тему
-        </button>
+        <div className="page-header-actions">
+          {isAdmin && (
+            <button className="ghost" type="button" onClick={() => navigate("/admin/metrics")}>
+              Метрики
+            </button>
+          )}
+          <button className="primary" onClick={() => setIsAddOpen(true)}>
+            + Создать тему
+          </button>
+        </div>
       </header>
       {error && <div className="error">{error}</div>}
       {notice && <div className="notice">{notice}</div>}

@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import TopicsPage from "./pages/TopicsPage";
 import TopicDetailPage from "./pages/TopicDetailPage";
 import GenerationPage from "./pages/GenerationPage";
+import AdminMetricsPage from "./pages/AdminMetricsPage";
 import DebugPanel from "./components/DebugPanel";
 import { useTelegramAuth } from "./hooks/useTelegramAuth";
 
@@ -43,6 +44,7 @@ export default function App() {
     <>
       <Routes>
         <Route path="/" element={<TopicsPage />} />
+        <Route path="/admin/metrics" element={<AdminMetricsPage />} />
         <Route path="/topics/:topicId" element={<TopicDetailPage />} />
         <Route path="/topics/:topicId/generate" element={<GenerationPage />} />
       </Routes>
