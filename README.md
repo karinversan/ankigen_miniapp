@@ -292,6 +292,27 @@ celery -A worker.app.celery_app worker -l info
 - `JOB_CHUNK_CONCURRENCY=4` — параллелизм chunking
 
 ## Метрики и бенчмарк
+Для контрольного end-to-end прогона (создать тему -> загрузить файл -> запустить генерацию -> дождаться результата -> собрать метрики):
+
+```bash
+uv run python scripts/generation_benchmark_run.py \
+  --api-base-url https://your-api.example.com \
+  --bot-token "$BOT_TOKEN" \
+  --runs 3 \
+  --questions 20 \
+  --json-out results/benchmark-summary.json
+```
+
+Опционально можно передать свои входные файлы (повтори флаг несколько раз):
+
+```bash
+uv run python scripts/generation_benchmark_run.py \
+  --api-base-url https://your-api.example.com \
+  --bot-token "$BOT_TOKEN" \
+  --file ./samples/doc1.txt \
+  --file ./samples/doc2.txt
+```
+
 После нескольких запусков генерации можно собрать агрегированный отчёт:
 
 ```bash
@@ -300,7 +321,15 @@ uv run python scripts/generation_metrics_report.py --limit 50 \
   --md-out results/metrics-summary.md
 ```
 
-Скрипт считает ключевые метрики для резюме: `p50/p95` по времени, скорость генерации, среднюю LLM latency, число вызовов, dedupe и stage timings.
+Скрипт считает ключевые метрики для резюме:
+- `p50/p95` по времени и скорости
+- `quality_score`, `source_coverage_ratio`, `question_uniqueness_ratio`
+- stage timings
+- нормализованные метрики для честного сравнения разных по размеру данных:
+  - `seconds per question`
+  - `seconds per 1k input chars`
+  - `input chars/sec`
+  - E2E по группам количества файлов (`1`, `2-3`, `4-5`, `6+`)
 
 ## Что важно знать
 - Файлы хранятся **зашифрованно** (AES‑GCM).
