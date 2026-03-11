@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 from typing import Any
 
@@ -29,6 +30,27 @@ logger = logging.getLogger(__name__)
 
 def _cancelled(ctx: QAContext) -> bool:
     return bool(ctx.should_cancel and ctx.should_cancel())
+
+
+def _per_file_quota(ctx: QAContext) -> int:
+    files_count = max(1, len(ctx.files))
+    return max(2, math.ceil(ctx.requested_total / files_count))
+
+
+def _qgen_target_raw(quota: int) -> int:
+    provider = (settings.llm_provider or "ollama").strip().lower()
+    # Remote providers are usually rate-limited, so keep less overgeneration.
+    multiplier = 1.5 if provider in {"openrouter", "gemini"} else 2.0
+    raw_target = max(quota + 4, int(round(quota * multiplier)))
+    return max(6, raw_target)
+
+
+def _planner_topics_target(quota: int) -> int:
+    target_raw = _qgen_target_raw(quota)
+    per_topic_cap = max(1, min(settings.rag_questions_per_topic, 6))
+    needed = max(1, math.ceil(target_raw / per_topic_cap))
+    min_topics = 1 if quota <= 4 else 2
+    return max(min_topics, min(settings.rag_max_topics, needed))
 
 
 def _parse_qgen_payload(
@@ -231,6 +253,9 @@ class PlannerAgent(Agent):
         assert ctx.llm is not None
 
         per_file_topics: dict[str, list[str]] = {}
+        per_file_quota = _per_file_quota(ctx)
+        target = _planner_topics_target(per_file_quota)
+        ctx.metrics["planner_topics_target"] = target
         for f in ctx.files:
             if _cancelled(ctx):
                 return ctx
@@ -240,7 +265,6 @@ class PlannerAgent(Agent):
                 per_file_topics[f.file_id] = []
                 continue
 
-            target = max(3, min(10, ctx.requested_total // max(1, len(ctx.files)) // 3 + 3))
             prompt = (
                 "Сформируй список тем по документу ниже.\n"
                 f"Нужно ровно {target} тем.\n"
@@ -341,12 +365,13 @@ class QGenAgent(Agent):
     def run(self, ctx: QAContext) -> QAContext:
         assert ctx.llm is not None
 
+        quota = _per_file_quota(ctx)
+        target_raw = _qgen_target_raw(quota)
+        ctx.metrics["qgen_target_raw_per_file"] = target_raw
         for f in ctx.files:
             if _cancelled(ctx):
                 return ctx
             evidence_items = ctx.per_file_evidence.get(f.file_id, [])
-            quota = max(2, ctx.requested_total // max(1, len(ctx.files)))
-            target_raw = quota * 3
 
             questions: list[dict[str, Any]] = []
             for ev in evidence_items:
