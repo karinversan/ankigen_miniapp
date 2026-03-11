@@ -7,7 +7,7 @@ It is already production-oriented for Dokploy:
 - no local bind mounts from your laptop;
 - no host `ports` bindings (no port conflicts with other projects);
 - persistent Docker volumes for Postgres and app data;
-- web runs as built Vite app (`vite preview` on port `4173`);
+- web is built in image build stage and served by nginx on port `4173`;
 - API runs migrations on startup.
 
 ## 2. Create app in Dokploy
