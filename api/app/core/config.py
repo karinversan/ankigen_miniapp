@@ -28,8 +28,14 @@ class Settings(BaseSettings):
     clamav_required: bool = False
 
     gemini_api_key: str | None = None
+    openrouter_api_key: str | None = None
     llm_provider: str = "ollama"
     gemini_model: str = "gemini-2.5-flash-lite"
+    openrouter_model: str = "qwen/qwen3-8b:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_request_timeout_seconds: int = 180
+    openrouter_temperature: float = 0.3
+    openrouter_app_name: str = "Telegram Anki"
     local_llm_model: str = "qwen2.5:3b-instruct-q4_K_M"
     ollama_base_url: str = "http://localhost:11434"
     ollama_request_timeout_seconds: int = 180

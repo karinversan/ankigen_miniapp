@@ -160,6 +160,84 @@ class LocalOllamaClient:
         )
 
 
+class OpenRouterClient:
+    provider = "openrouter"
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str,
+        temperature: float,
+        timeout_seconds: int,
+        app_name: str,
+    ) -> None:
+        self.model_name = model
+        self._api_key = api_key
+        self._url = f"{base_url.rstrip('/')}/chat/completions"
+        self._timeout = max(5, timeout_seconds)
+        self._payload = {
+            "model": model,
+            "temperature": temperature,
+            "response_format": {"type": "json_object"},
+        }
+        self._app_name = app_name.strip() or "Telegram Anki"
+
+    def invoke(self, prompt: str) -> LLMMessage:
+        payload = dict(self._payload)
+        payload["messages"] = [{"role": "user", "content": prompt}]
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": settings.web_base_url,
+            "X-Title": self._app_name,
+        }
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(self._url, json=payload, headers=headers)
+                if response.status_code == 400 and "response_format" in response.text.lower():
+                    payload.pop("response_format", None)
+                    response = client.post(self._url, json=payload, headers=headers)
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError("OpenRouter request failed. Check API key, model and network access.") from exc
+
+        data = response.json()
+        if isinstance(data, dict) and data.get("error"):
+            error = data["error"]
+            if isinstance(error, dict):
+                message = str(error.get("message") or error.get("code") or "OpenRouter error")
+            else:
+                message = str(error)
+            raise RuntimeError(message)
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("OpenRouter returned empty choices")
+        message = choices[0].get("message", {})
+        content_raw = message.get("content")
+        content = _extract_openrouter_content(content_raw)
+        if not content.strip():
+            raise RuntimeError("OpenRouter returned empty response")
+
+        usage_raw = data.get("usage")
+        usage = {
+            "prompt_tokens": _safe_number(usage_raw.get("prompt_tokens")) if isinstance(usage_raw, dict) else None,
+            "completion_tokens": _safe_number(usage_raw.get("completion_tokens")) if isinstance(usage_raw, dict) else None,
+            "total_tokens": _safe_number(usage_raw.get("total_tokens")) if isinstance(usage_raw, dict) else None,
+        }
+        response_meta = {
+            "model": data.get("model") or self.model_name,
+            "provider": "openrouter",
+        }
+        return LLMMessage(
+            content,
+            response_metadata=response_meta,
+            usage_metadata=usage,
+        )
+
+
 def local_ollama_client() -> LocalOllamaClient:
     return LocalOllamaClient(
         model=settings.local_llm_model,
@@ -170,6 +248,20 @@ def local_ollama_client() -> LocalOllamaClient:
         num_predict=settings.ollama_num_predict,
         num_gpu=settings.ollama_num_gpu,
         keep_alive=settings.ollama_keep_alive,
+    )
+
+
+def openrouter_client() -> OpenRouterClient:
+    api_key = (settings.openrouter_api_key or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set")
+    return OpenRouterClient(
+        model=settings.openrouter_model,
+        api_key=api_key,
+        base_url=settings.openrouter_base_url,
+        temperature=settings.openrouter_temperature,
+        timeout_seconds=settings.openrouter_request_timeout_seconds,
+        app_name=settings.openrouter_app_name,
     )
 
 
@@ -206,6 +298,8 @@ def build_llm() -> Any:
     provider = (settings.llm_provider or "ollama").strip().lower()
     if provider in {"ollama", "local"}:
         return local_ollama_client()
+    if provider == "openrouter":
+        return openrouter_client()
     if provider == "gemini":
         return gemini_client()
     raise ValueError(f"Unsupported llm provider: {settings.llm_provider}")
@@ -229,9 +323,29 @@ def llm_descriptor(llm: Any) -> dict[str, Any]:
     if isinstance(llm, LocalOllamaClient):
         descriptor["model"] = llm.model_name
         descriptor["acceleration"] = "metal" if system_name == "darwin" else "cpu_or_cuda"
+    elif isinstance(llm, OpenRouterClient):
+        descriptor["model"] = llm.model_name
+        descriptor["acceleration"] = "remote"
     else:
         descriptor["model"] = settings.gemini_model
     return descriptor
+
+
+def _extract_openrouter_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text_parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return "\n".join(part.strip() for part in text_parts if part and part.strip()).strip()
+    return str(content or "").strip()
 
 
 def _should_cancel(should_cancel: Any | None) -> bool:

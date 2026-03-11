@@ -452,9 +452,15 @@ async def run_generation_job(job_id: str) -> None:
                 final_questions = len(questions)
                 generation_elapsed = stage_seconds.get("generating", 0.0)
                 llm_provider = (settings.llm_provider or "ollama").strip().lower()
+                if llm_provider in {"ollama", "local"}:
+                    llm_model = settings.local_llm_model
+                elif llm_provider == "openrouter":
+                    llm_model = settings.openrouter_model
+                else:
+                    llm_model = settings.gemini_model
                 metrics_json = {
                     "llm_provider": llm_provider,
-                    "llm_model": settings.local_llm_model if llm_provider == "ollama" else settings.gemini_model,
+                    "llm_model": llm_model,
                     "mode": mode,
                     "requested_questions": requested_total,
                     "generated_questions_before_dedupe": before_dedupe_count,
