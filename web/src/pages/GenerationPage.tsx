@@ -227,7 +227,7 @@ export default function GenerationPage() {
   const canCancel = job?.status === "queued" || job?.status === "running";
   const canRetry = job?.status === "failed" || job?.status === "cancelled";
   const rawCount = job?.params_json?.number_of_questions;
-  const cardsCount = typeof rawCount === "number" ? rawCount : count;
+  const requestedCount = typeof rawCount === "number" ? rawCount : count;
   const apkgName = job?.result_paths?.apkg?.split("/").pop();
   const metrics =
     job?.metrics_json && typeof job.metrics_json === "object"
@@ -267,6 +267,9 @@ export default function GenerationPage() {
   const runtimeStageElapsedSec = metricToNumber(runtimeRaw?.stage_elapsed_sec);
   const runtimeUnitsDone = metricToNumber(runtimeRaw?.units_done);
   const runtimeUnitsTotal = metricToNumber(runtimeRaw?.units_total);
+  const runtimeMode = typeof runtimeRaw?.mode === "string" ? runtimeRaw.mode : null;
+  const finalQuestions = metricToNumber(metrics?.final_questions);
+  const cardsCount = finalQuestions !== null ? Math.max(0, Math.round(finalQuestions)) : requestedCount;
   const selectedUiModel = UI_MODELS.find((item) => item.value === uiModel) || UI_MODELS[0];
   const statusTitle =
     job?.status === "done"
@@ -312,7 +315,12 @@ export default function GenerationPage() {
     const base = `Этап: ${STAGE_LABELS[job.stage] || job.stage}`;
     if (job.stage === "generating") {
       const parts = [base];
-      if (runtimeUnitsDone !== null && runtimeUnitsTotal !== null && runtimeUnitsTotal > 0) {
+      if (
+        runtimeMode === "per_file" &&
+        runtimeUnitsDone !== null &&
+        runtimeUnitsTotal !== null &&
+        runtimeUnitsTotal > 0
+      ) {
         parts.push(`Прогресс: ${Math.min(runtimeUnitsDone, runtimeUnitsTotal)}/${runtimeUnitsTotal}`);
       }
       if (runtimeEtaSec !== null) {
@@ -470,6 +478,10 @@ export default function GenerationPage() {
               <div className="summary-row">
                 <span className="muted">Карточек</span>
                 <span>{cardsCount}</span>
+              </div>
+              <div className="summary-row">
+                <span className="muted">Запрошено карточек</span>
+                <span>{requestedCount}</span>
               </div>
               <div className="summary-row">
                 <span className="muted">Файлов</span>
