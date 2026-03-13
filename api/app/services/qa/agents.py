@@ -420,12 +420,13 @@ class QGenAgent(Agent):
 
         quota = _per_file_quota(ctx)
         target_raw = _qgen_target_raw(quota)
-        per_topic_limit = max(1, settings.rag_questions_per_topic)
-        max_rounds = max(1, settings.rag_max_qgen_rounds)
+        configured_per_topic_limit = max(1, settings.rag_questions_per_topic)
+        configured_max_rounds = max(1, settings.rag_max_qgen_rounds)
         ctx.metrics["qgen_target_raw_per_file"] = target_raw
-        ctx.metrics["qgen_questions_per_topic"] = per_topic_limit
-        ctx.metrics["qgen_max_rounds"] = max_rounds
+        ctx.metrics["qgen_questions_per_topic"] = configured_per_topic_limit
+        ctx.metrics["qgen_max_rounds"] = configured_max_rounds
         shortfall: dict[str, int] = {}
+        effective_qgen_params: dict[str, dict[str, int]] = {}
         for f in ctx.files:
             if _cancelled(ctx):
                 return ctx
@@ -436,6 +437,22 @@ class QGenAgent(Agent):
                 ctx.per_file_questions[f.file_id] = []
                 shortfall[f.file_id] = target_raw
                 continue
+
+            topics_count = max(1, len(evidence_items))
+            min_per_topic_needed = max(
+                1,
+                math.ceil(target_raw / max(1, topics_count * configured_max_rounds)),
+            )
+            per_topic_limit = min(12, max(configured_per_topic_limit, min_per_topic_needed))
+            max_rounds = min(
+                configured_max_rounds,
+                max(1, math.ceil(target_raw / max(1, topics_count * per_topic_limit)) + 2),
+            )
+            effective_qgen_params[f.file_id] = {
+                "topics": topics_count,
+                "per_topic_limit": per_topic_limit,
+                "max_rounds": max_rounds,
+            }
 
             questions: list[dict[str, Any]] = []
             for round_idx in range(max_rounds):
@@ -526,6 +543,8 @@ class QGenAgent(Agent):
         ctx.metrics["raw_questions_total"] = sum(len(v) for v in ctx.per_file_questions.values())
         ctx.metrics["qgen_shortfall_per_file"] = shortfall
         ctx.metrics["qgen_shortfall_total"] = sum(shortfall.values())
+        if effective_qgen_params:
+            ctx.metrics["qgen_effective_params"] = effective_qgen_params
         return ctx
 
 

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     llm_provider: str = "openrouter"
     gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_request_timeout_seconds: int = 120
     openrouter_model: str = "qwen/qwen3-8b:free"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_request_timeout_seconds: int = 180
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
 
     llm_json_retries: int = 1
     llm_json_repair_max_chars: int = 6000
+    llm_retry_budget_seconds: int = 180
 
     job_webhook_url: str | None = None
 

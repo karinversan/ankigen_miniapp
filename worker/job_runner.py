@@ -580,7 +580,9 @@ async def run_generation_job(job_id: str) -> None:
                         # Keep runtime progress below 100% until generation is actually complete.
                         ratio = min(0.95, elapsed / max(estimated_generation_sec, 1e-9))
                         progress = 65 + int(14 * ratio)
-                        eta = max(0.0, estimated_generation_sec - elapsed)
+                        eta = estimated_generation_sec - elapsed
+                        if eta <= 0:
+                            eta = None
                         units_total = max(1, requested_total)
                         units_done_estimate = int(requested_total * ratio)
                         units_done = min(max(0, units_total - 1), units_done_estimate)

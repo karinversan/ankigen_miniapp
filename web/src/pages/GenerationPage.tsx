@@ -325,6 +325,8 @@ export default function GenerationPage() {
       }
       if (runtimeEtaSec !== null) {
         parts.push(`Оценка: ~${formatDurationShort(runtimeEtaSec)}`);
+      } else if (runtimeStageElapsedSec !== null && runtimeStageElapsedSec >= 60) {
+        parts.push("Оценка: превышено расчётное время");
       }
       if (runtimeStageElapsedSec !== null) {
         parts.push(`Прошло: ${formatDurationShort(runtimeStageElapsedSec)}`);

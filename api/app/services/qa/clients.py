@@ -23,6 +23,7 @@ def gemini_client() -> ChatGoogleGenerativeAI:
         "model": settings.gemini_model,
         "temperature": 0.3,
         "response_mime_type": "application/json",
+        "timeout": max(5, int(settings.gemini_request_timeout_seconds)),
     }
     if api_key:
         kwargs["google_api_key"] = api_key
@@ -30,6 +31,7 @@ def gemini_client() -> ChatGoogleGenerativeAI:
         return ChatGoogleGenerativeAI(**kwargs)
     except TypeError:
         kwargs.pop("response_mime_type", None)
+        kwargs.pop("timeout", None)
         return ChatGoogleGenerativeAI(**kwargs)
 
 
@@ -345,11 +347,18 @@ def invoke(
     last: Exception | None = None
     retry_re = re.compile(r"retry(?:_delay)?[^0-9]*([0-9]+(?:\\.[0-9]+)?)", re.IGNORECASE)
     provider = str(getattr(llm, "provider", "") or "").strip().lower()
+    if not provider and llm.__class__.__name__.lower().startswith("chatgooglegenerativeai"):
+        provider = "gemini"
     effective_attempts = max(1, attempts)
     total_retry_budget_sec: float | None = None
     if provider == "openrouter":
         effective_attempts = min(effective_attempts, 3)
         total_retry_budget_sec = max(30.0, float(settings.openrouter_request_timeout_seconds) * 1.5)
+    elif provider == "gemini":
+        effective_attempts = min(effective_attempts, 3)
+        total_retry_budget_sec = max(30.0, float(settings.gemini_request_timeout_seconds) * 1.5)
+    else:
+        total_retry_budget_sec = max(30.0, float(settings.llm_retry_budget_seconds))
     started_total = time.perf_counter()
     for attempt in range(effective_attempts):
         if _should_cancel(should_cancel):
@@ -412,7 +421,7 @@ def invoke(
                     break
         if _should_cancel(should_cancel):
             return ""
-    if total_retry_budget_sec is not None and provider == "openrouter":
+    if total_retry_budget_sec is not None:
         elapsed_total = time.perf_counter() - started_total
         raise RuntimeError(
             f"LLM invoke failed after {effective_attempts} attempts in {elapsed_total:.1f}s: {last}"
