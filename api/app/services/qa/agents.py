@@ -19,6 +19,7 @@ from app.services.qa.utils import (
     build_context_packet,
     cheap_dedupe,
     chunk_hash,
+    detect_language_hint,
     normalize_text,
     normalize_chunks,
     normalize_question_items,
@@ -53,10 +54,31 @@ def _qgen_target_raw(quota: int) -> int:
 
 def _planner_topics_target(quota: int) -> int:
     target_raw = _qgen_target_raw(quota)
-    per_topic_cap = max(1, min(settings.rag_questions_per_topic, 6))
+    per_topic_cap = max(1, settings.rag_questions_per_topic)
     needed = max(1, math.ceil(target_raw / per_topic_cap))
     min_topics = 1 if quota <= 4 else 2
     return max(min_topics, min(settings.rag_max_topics, needed))
+
+
+def _lang_rules(lang: str) -> tuple[str, str, str]:
+    normalized = (lang or "mixed").strip().lower()
+    if normalized == "en":
+        return (
+            "Language: English.",
+            "Return topic labels in English.",
+            "Use English for question and answer text.",
+        )
+    if normalized == "ru":
+        return (
+            "Язык: русский.",
+            "Возвращай темы на русском языке.",
+            "Используй русский язык для вопроса и ответа.",
+        )
+    return (
+        "Язык: язык исходного фрагмента. Не смешивай языки внутри одного вопроса.",
+        "Язык тем должен соответствовать языку фрагмента.",
+        "Язык вопроса и ответа должен совпадать с языком конкретного фрагмента.",
+    )
 
 
 def _parse_qgen_payload(
@@ -156,20 +178,27 @@ class SetupAgent(Agent):
         else:
             ctx.metrics["embeddings_disabled"] = True
         ctx.metrics.setdefault("files", len(ctx.files))
+        ctx.metrics["avoid_repeats"] = bool(ctx.avoid_repeats)
         return ctx
 
 
 class NormalizeChunksAgent(Agent):
     def run(self, ctx: QAContext) -> QAContext:
         normalized: dict[str, list[dict[str, Any]]] = {}
+        per_file_language: dict[str, str] = {}
         for f in ctx.files:
             if _cancelled(ctx):
                 return ctx
             chunks = normalize_chunks(f.chunks, f.file_name)
             if chunks:
                 normalized[f.file_id] = chunks
+                sample_text = " ".join(ch.get("text", "")[:400] for ch in chunks[:6])
+                per_file_language[f.file_id] = detect_language_hint(sample_text)
         ctx.normalized_chunks = normalized
+        ctx.per_file_language = per_file_language
         ctx.metrics["normalized_files"] = len(normalized)
+        if per_file_language:
+            ctx.metrics["language_per_file"] = per_file_language
         return ctx
 
 
@@ -275,11 +304,15 @@ class PlannerAgent(Agent):
             if not sample.strip():
                 per_file_topics[f.file_id] = []
                 continue
+            lang = ctx.per_file_language.get(f.file_id, "mixed")
+            _, planner_lang_rule, _ = _lang_rules(lang)
 
             prompt = (
                 "Сформируй список тем по документу ниже.\n"
                 f"Нужно ровно {target} тем.\n"
                 "Темы короткие, существительные/словосочетания.\n"
+                "- Нельзя использовать структурные темы: номера глав, страниц, разделов, contents, appendix.\n"
+                f"- {planner_lang_rule}\n"
                 "Верни ТОЛЬКО JSON-объект вида {\"items\": [\"тема\", ...]} без Markdown.\n\n"
                 f"ДОКУМЕНТ (ФРАГМЕНТЫ):\n{sample}"
             )
@@ -323,7 +356,10 @@ class EvidenceAgent(Agent):
                     (ch, set(normalize_text(str(ch.get("text", ""))).split()))
                     for ch in chunks
                 ]
-                topics = ctx.per_file_topics.get(f.file_id) or ["ключевые факты"]
+                lang = ctx.per_file_language.get(f.file_id, "mixed")
+                topics = ctx.per_file_topics.get(f.file_id) or (
+                    ["key facts"] if lang == "en" else ["ключевые факты"]
+                )
                 evidence_items: list[dict[str, Any]] = []
                 for topic in topics:
                     if _cancelled(ctx):
@@ -347,7 +383,10 @@ class EvidenceAgent(Agent):
                 per_file_evidence[f.file_id] = evidence_items
                 continue
             retriever = store.as_retriever(search_kwargs={"k": settings.rag_top_k})
-            topics = ctx.per_file_topics.get(f.file_id) or ["ключевые факты"]
+            lang = ctx.per_file_language.get(f.file_id, "mixed")
+            topics = ctx.per_file_topics.get(f.file_id) or (
+                ["key facts"] if lang == "en" else ["ключевые факты"]
+            )
 
             evidence_items: list[dict[str, Any]] = []
             for topic in topics:
@@ -381,84 +420,112 @@ class QGenAgent(Agent):
 
         quota = _per_file_quota(ctx)
         target_raw = _qgen_target_raw(quota)
+        per_topic_limit = max(1, settings.rag_questions_per_topic)
+        max_rounds = max(1, settings.rag_max_qgen_rounds)
         ctx.metrics["qgen_target_raw_per_file"] = target_raw
+        ctx.metrics["qgen_questions_per_topic"] = per_topic_limit
+        ctx.metrics["qgen_max_rounds"] = max_rounds
+        shortfall: dict[str, int] = {}
         for f in ctx.files:
             if _cancelled(ctx):
                 return ctx
             evidence_items = ctx.per_file_evidence.get(f.file_id, [])
+            lang = ctx.per_file_language.get(f.file_id, "mixed")
+            qgen_lang_rule, _, answer_lang_rule = _lang_rules(lang)
+            if not evidence_items:
+                ctx.per_file_questions[f.file_id] = []
+                shortfall[f.file_id] = target_raw
+                continue
 
             questions: list[dict[str, Any]] = []
-            for ev in evidence_items:
-                if _cancelled(ctx):
-                    return ctx
-                used_questions = [
-                    q.get("question", "")
-                    for q in questions
-                    if isinstance(q.get("question", ""), str) and q.get("question")
-                ][-6:]
-                avoid_block = ""
-                if used_questions:
-                    avoid_block = "НЕ ПОВТОРЯЙ ЭТИ ИДЕИ:\n" + "\n".join(
-                        f"- {q.strip()}" for q in used_questions if q.strip()
+            for round_idx in range(max_rounds):
+                if _cancelled(ctx) or len(questions) >= target_raw:
+                    break
+                round_started = len(questions)
+                for ev in evidence_items:
+                    if _cancelled(ctx):
+                        return ctx
+                    if len(questions) >= target_raw:
+                        break
+                    used_questions = [
+                        q.get("question", "")
+                        for q in questions
+                        if isinstance(q.get("question", ""), str) and q.get("question")
+                    ][-8:]
+                    avoid_block = ""
+                    if used_questions:
+                        avoid_block = "НЕ ПОВТОРЯЙ ЭТИ ИДЕИ:\n" + "\n".join(
+                            f"- {q.strip()}" for q in used_questions if q.strip()
+                        )
+
+                    topic = ev.get("topic", "")
+                    context = ev.get("context", "")
+                    if not context:
+                        continue
+                    remaining = max(1, target_raw - len(questions))
+                    request_count = min(per_topic_limit, remaining)
+                    prompt = (
+                        "Ты генерируешь обучающие вопросы по материалу.\n"
+                        "Правила:\n"
+                        "- Используй ТОЛЬКО информацию из КОНТЕКСТА.\n"
+                        "- Для каждого вопроса добавь sources: список меток source из контекста.\n"
+                        "- Типы: open, mcq, tf.\n"
+                        "- mcq: ровно 4 варианта, correct_index 0..3.\n"
+                        f"- {qgen_lang_rule}\n"
+                        f"- {answer_lang_rule}\n"
+                        "- Запрещены вопросы про структуру документа: номера глав, страниц, разделов, appendices.\n"
+                        "- Каждый вопрос должен покрывать НОВЫЙ факт; не повторяй идеи.\n"
+                        f"- Нужно до {request_count} вопросов.\n"
+                        "- Верни ТОЛЬКО JSON-объект вида {\"items\": [...]} без Markdown и пояснений.\n"
+                        "Формат элементов:\n"
+                        "{type, question, answer, options, correct_index, tags, sources, evidence}\n\n"
+                        f"ИТЕРАЦИЯ: {round_idx + 1}\n"
+                        f"ТЕМА: {topic}\n"
+                        f"СЛОЖНОСТЬ: {ctx.difficulty}\n\n"
+                        f"{avoid_block}\n\nКОНТЕКСТ:\n{context}"
                     )
 
-                topic = ev.get("topic", "")
-                context = ev.get("context", "")
-                if not context:
-                    continue
-
-                prompt = (
-                    "Ты генерируешь обучающие вопросы по материалу.\n"
-                    "Правила:\n"
-                    "- Используй ТОЛЬКО информацию из КОНТЕКСТА.\n"
-                    "- Для каждого вопроса добавь sources: список меток source из контекста.\n"
-                    "- Типы: open, mcq, tf.\n"
-                    "- mcq: ровно 4 варианта, correct_index 0..3.\n"
-                    "- Язык: русский.\n"
-                    "- Каждый вопрос должен покрывать НОВЫЙ факт; не повторяй идеи.\n"
-                    f"- Нужно до {min(settings.rag_questions_per_topic, 6)} вопросов.\n"
-                    "- Верни ТОЛЬКО JSON-объект вида {\"items\": [...]} без Markdown и пояснений.\n"
-                    "Формат элементов:\n"
-                    "{type, question, answer, options, correct_index, tags, sources, evidence}\n\n"
-                    f"ТЕМА: {topic}\n"
-                    f"СЛОЖНОСТЬ: {ctx.difficulty}\n\n"
-                    f"{avoid_block}\n\nКОНТЕКСТ:\n{context}"
-                )
-
-                raw = invoke(
-                    ctx.llm,
-                    prompt,
-                    should_cancel=ctx.should_cancel,
-                    metrics=ctx.metrics,
-                    operation="qgen",
-                )
-                data = _parse_qgen_payload(
-                    ctx.llm,
-                    raw,
-                    f.file_name,
-                    should_cancel=ctx.should_cancel,
-                    metrics=ctx.metrics,
-                )
-                if not data:
-                    continue
-
-                for item in data:
-                    if not isinstance(item, dict):
+                    raw = invoke(
+                        ctx.llm,
+                        prompt,
+                        should_cancel=ctx.should_cancel,
+                        metrics=ctx.metrics,
+                        operation="qgen",
+                    )
+                    data = _parse_qgen_payload(
+                        ctx.llm,
+                        raw,
+                        f.file_name,
+                        should_cancel=ctx.should_cancel,
+                        metrics=ctx.metrics,
+                    )
+                    if not data:
                         continue
-                    question = (item.get("question") or "").strip()
-                    if not question:
-                        continue
-                    item.setdefault("type", "open")
-                    item.setdefault("tags", [])
-                    item.setdefault("sources", [])
-                    item.setdefault("evidence", [])
-                    questions.append(item)
 
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        question = (item.get("question") or "").strip()
+                        if not question:
+                            continue
+                        item.setdefault("type", "open")
+                        item.setdefault("tags", [])
+                        item.setdefault("sources", [])
+                        item.setdefault("evidence", [])
+                        questions.append(item)
+                        if len(questions) >= target_raw:
+                            break
                 if len(questions) >= target_raw:
+                    break
+                if len(questions) == round_started:
+                    # Stop early when a full round produced no additional valid items.
                     break
 
             ctx.per_file_questions[f.file_id] = questions[:target_raw]
+            shortfall[f.file_id] = max(0, target_raw - len(ctx.per_file_questions[f.file_id]))
         ctx.metrics["raw_questions_total"] = sum(len(v) for v in ctx.per_file_questions.values())
+        ctx.metrics["qgen_shortfall_per_file"] = shortfall
+        ctx.metrics["qgen_shortfall_total"] = sum(shortfall.values())
         return ctx
 
 
@@ -487,7 +554,7 @@ class MixerAgent(Agent):
         if _cancelled(ctx):
             return ctx
         all_items: list[dict[str, Any]] = []
-        per_file_quota = max(1, ctx.requested_total // max(1, len(ctx.files)))
+        per_file_quota = max(1, math.ceil(ctx.requested_total / max(1, len(ctx.files))))
 
         for f in ctx.files:
             items = ctx.per_file_questions.get(f.file_id, [])
@@ -500,8 +567,9 @@ class MixerAgent(Agent):
 
         all_items = normalize_question_items(all_items, ctx.difficulty)
         before = len(all_items)
-        all_items = cheap_dedupe(all_items)
-        all_items = dedupe_questions(all_items)
+        if ctx.avoid_repeats:
+            all_items = cheap_dedupe(all_items)
+            all_items = dedupe_questions(all_items)
         after = len(all_items)
 
         ctx.metrics["dedupe_drop_rate"] = (before - after) / max(1, before)
@@ -515,8 +583,9 @@ class MixerAgent(Agent):
                         break
                 if len(all_items) >= ctx.requested_total:
                     break
-            all_items = cheap_dedupe(all_items)
-            all_items = dedupe_questions(all_items)
+            if ctx.avoid_repeats:
+                all_items = cheap_dedupe(all_items)
+                all_items = dedupe_questions(all_items)
 
         all_items = [to_anki_qa(item) for item in all_items]
 

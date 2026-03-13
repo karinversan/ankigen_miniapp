@@ -21,6 +21,7 @@ def generate_questions_for_files(
     files: list[FileInput],
     requested_total: int,
     difficulty: str,
+    avoid_repeats: bool = True,
     should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[list[dict], dict]:
     started = time.perf_counter()
@@ -28,6 +29,7 @@ def generate_questions_for_files(
         files=files,
         requested_total=requested_total,
         difficulty=difficulty,
+        avoid_repeats=avoid_repeats,
         should_cancel=should_cancel,
     )
 

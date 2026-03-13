@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     rag_max_chunks: int = 400
     rag_claims_per_topic: int = 12
     rag_questions_per_topic: int = 6
+    rag_max_qgen_rounds: int = 12
     rag_judge_batch_size: int = 8
     rag_use_embeddings: bool = True
     rag_reuse_vector_store: bool = True

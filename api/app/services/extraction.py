@@ -37,7 +37,7 @@ def _extract_pdf(content: bytes) -> str:
         if not text.strip():
             empty_pages += 1
             continue
-        parts.append(f"[PAGE {idx}]\n{text}")
+        parts.append(text)
     if empty_pages:
         logger.warning(
             "PDF extraction: %s/%s empty pages (possible scans or complex layout).",

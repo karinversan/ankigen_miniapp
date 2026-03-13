@@ -444,6 +444,7 @@ async def run_generation_job(job_id: str) -> None:
                 requested_total = int(params.get("number_of_questions", 20))
                 difficulty = params.get("difficulty", "medium")
                 mode = params.get("mode", "merged")
+                avoid_repeats = bool(params.get("avoid_repeats", True))
                 include_answers = bool(params.get("include_answers", True))
 
                 if await _is_cancelled(session, job):
@@ -480,7 +481,7 @@ async def run_generation_job(job_id: str) -> None:
                 if mode == "per_file":
                     outputs: list[list[dict]] = []
                     per_file_metrics: list[dict[str, Any]] = []
-                    per_file_count = max(3, requested_total // max(1, len(file_inputs)))
+                    per_file_count = max(3, -(-requested_total // max(1, len(file_inputs))))
                     total_files = max(1, len(file_inputs))
                     for idx, file_input in enumerate(file_inputs, start=1):
                         if should_cancel():
@@ -507,6 +508,7 @@ async def run_generation_job(job_id: str) -> None:
                                 [file_input],
                                 per_file_count,
                                 difficulty,
+                                avoid_repeats,
                                 should_cancel,
                             )
                         )
@@ -566,6 +568,7 @@ async def run_generation_job(job_id: str) -> None:
                             file_inputs,
                             requested_total,
                             difficulty,
+                            avoid_repeats,
                             should_cancel,
                         )
                     )
@@ -613,11 +616,15 @@ async def run_generation_job(job_id: str) -> None:
                 await _update_job(session, job, stage="deduping", progress=_stage_progress("deduping"))
                 deduping_started = time.perf_counter()
                 before_dedupe_count = len(questions)
-                deduped = dedupe_questions(questions)
-                deduped_count = len(deduped)
-                if deduped_count < requested_total:
-                    deduped.extend(questions)
-                questions = deduped[:requested_total]
+                if avoid_repeats:
+                    deduped = dedupe_questions(questions)
+                    deduped_count = len(deduped)
+                    if deduped_count < requested_total:
+                        deduped.extend(questions)
+                    questions = deduped[:requested_total]
+                else:
+                    deduped_count = before_dedupe_count
+                    questions = questions[:requested_total]
                 if not include_answers:
                     for item in questions:
                         item.pop("answer", None)
@@ -655,6 +662,7 @@ async def run_generation_job(job_id: str) -> None:
                     "llm_model": llm_model,
                     "mode": mode,
                     "requested_questions": requested_total,
+                    "avoid_repeats": avoid_repeats,
                     "generated_questions_before_dedupe": before_dedupe_count,
                     "deduped_questions": deduped_count,
                     "final_questions": final_questions,

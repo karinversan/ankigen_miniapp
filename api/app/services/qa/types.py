@@ -19,11 +19,13 @@ class QAContext:
     files: list[FileInput]
     requested_total: int
     difficulty: str
+    avoid_repeats: bool = True
     llm: Any | None = None
     embeddings: Embeddings | None = None
     should_cancel: Callable[[], bool] | None = None
     stores: dict[str, Chroma] = field(default_factory=dict)
     normalized_chunks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    per_file_language: dict[str, str] = field(default_factory=dict)
     per_file_questions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     per_file_topics: dict[str, list[str]] = field(default_factory=dict)
     per_file_evidence: dict[str, list[dict[str, Any]]] = field(default_factory=dict)

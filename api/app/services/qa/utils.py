@@ -39,7 +39,22 @@ _TF_PREFIXES = (
     "всегда ли",
     "может ли",
     "является ли",
+    "is it true",
+    "true or false",
+    "does it",
+    "is the",
 )
+
+_STRUCTURAL_QUESTION_PATTERNS = [
+    r"(?i)\b(глава|раздел|параграф|страниц[аеы]|chapter|section|part|page)\b",
+    r"(?i)\b(в|во)\s+\d+\s*(главе|разделе)\b",
+    r"(?i)\b(in|on)\s+(chapter|section|part|page)\s+\d+\b",
+    r"(?i)\bчто\s+(говорится|сказано|написано)\b",
+    r"(?i)\bwhat\s+(does|is)\s+.*\b(chapter|section|part|page)\b",
+]
+_COMPILED_STRUCTURAL: list[re.Pattern] | None = None
+_CYRILLIC_RE = re.compile(r"[а-яё]", flags=re.IGNORECASE)
+_LATIN_RE = re.compile(r"[a-z]", flags=re.IGNORECASE)
 
 
 def _unrelated_patterns() -> list[re.Pattern]:
@@ -72,6 +87,14 @@ def _generic_patterns() -> list[re.Pattern]:
     return _COMPILED_GENERIC
 
 
+def _structural_patterns() -> list[re.Pattern]:
+    global _COMPILED_STRUCTURAL
+    if _COMPILED_STRUCTURAL is not None:
+        return _COMPILED_STRUCTURAL
+    _COMPILED_STRUCTURAL = [re.compile(p) for p in _STRUCTURAL_QUESTION_PATTERNS]
+    return _COMPILED_STRUCTURAL
+
+
 def filter_unrelated_text(text: str) -> tuple[str, int]:
     if not settings.filter_unrelated_content:
         return text, 0
@@ -101,6 +124,34 @@ def starts_with_tf_prefix(question: str) -> bool:
     cleaned = question.strip().lower()
     cleaned = re.sub(r"^[^a-zа-я0-9]+", "", cleaned)
     return any(cleaned.startswith(prefix) for prefix in _TF_PREFIXES)
+
+
+def contains_cyrillic(text: str) -> bool:
+    return bool(_CYRILLIC_RE.search(text or ""))
+
+
+def detect_language_hint(text: str) -> str:
+    cyr = len(_CYRILLIC_RE.findall(text or ""))
+    lat = len(_LATIN_RE.findall(text or ""))
+    total = cyr + lat
+    if total == 0:
+        return "mixed"
+    if cyr == 0:
+        return "en"
+    if lat == 0:
+        return "ru"
+    if cyr / total >= 0.7:
+        return "ru"
+    if lat / total >= 0.7:
+        return "en"
+    return "mixed"
+
+
+def is_structural_question(question: str) -> bool:
+    cleaned = (question or "").strip()
+    if not cleaned:
+        return False
+    return any(p.search(cleaned) for p in _structural_patterns())
 
 
 def is_generic_answer(answer: str, question: str) -> bool:
@@ -231,13 +282,11 @@ def to_anki_qa(item: dict[str, Any]) -> dict[str, Any]:
             tags.append("open")
     elif q_type == "tf":
         item["type"] = "open"
-        if question and not starts_with_tf_prefix(question):
-            question = f"Верно ли, что {question.rstrip('?')}?"
         answer_lower = answer.lower()
         if answer_lower in {"true", "верно", "истина", "да"}:
-            answer = "Верно"
+            answer = "Верно" if contains_cyrillic(question) else "True"
         elif answer_lower in {"false", "неверно", "ложь", "нет"}:
-            answer = "Неверно"
+            answer = "Неверно" if contains_cyrillic(question) else "False"
         tags = [t for t in tags if t != "tf"]
         if "open" not in tags:
             tags.append("open")
@@ -267,6 +316,8 @@ def normalize_question_items(items: list[dict[str, Any]], difficulty: str) -> li
             continue
         question = str(item.get("question", "")).strip()
         if not question:
+            continue
+        if is_structural_question(question):
             continue
         q_type = str(item.get("type", "open")).lower().strip()
         tags = item.get("tags") or []
