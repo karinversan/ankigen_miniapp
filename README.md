@@ -209,55 +209,6 @@ docker compose up -d --build
 # STACK_NAME=tg_anki_prod docker compose up -d --build
 ```
 
-Особенности этого compose:
-- используется только один файл `docker-compose.yml`;
-- нет `ports` на хосте, поэтому нет конфликтов портов с другими проектами;
-- для доступа снаружи используй домены через Dokploy (`app.example.com`, `api.example.com`).
-
-### Полезные команды
-```bash
-docker compose up -d --build
-docker compose logs -f api worker
-docker compose ps
-```
-
-### Модель генерации (OpenRouter / Gemini)
-- `LLM_PROVIDER=openrouter`
-- `OPENROUTER_API_KEY=<your-api-key>`
-- `OPENROUTER_MODEL=qwen/qwen3-8b:free` (или любой совместимый JSON-friendly model)
-- `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`
-- `LLM_PROVIDER=gemini` + `GEMINI_API_KEY=<your-api-key>` для Gemini
-
-Если используешь uv локально:
-```bash
-uv run ruff check .
-uv run pytest
-```
-
-### Локальный запуск (без Docker)
-```bash
-uvicorn api.app.main:app --reload
-python -m app.main          # bot
-celery -A worker.app.celery_app worker -l info
-```
-
-## Telegram setup (локально, без Docker)
-1) Подними локально Web App (порт 5173) и API (порт 8000).
-2) Получи HTTPS‑URL через ngrok (или аналог), например `ngrok http 5173`.
-3) Пропиши `WEB_BASE_URL` в `.env` равным HTTPS‑URL (домен должен совпадать с Web App).
-4) В BotFather:
-   - Настрой меню‑кнопку Web App: В настройках бота выбрать Mini App URL и вставить полученное значение, также можно настроить и кнокпку menu: `/setmenubutton` → выбрать бота → URL → название. 
-   - (Опционально) Настрой Mini App в профиле бота через `Bot Settings → Configure Mini App`.
-5) Перезапусти сервисы и открывай Web App через кнопку в боте.
-
-## Deploy on Dokploy (production)
-- Используй файл `docker-compose.yml` из корня репозитория (один deploy-flow для Dokploy).
-- Подробная пошаговая инструкция (GitHub app, env, domains, HTTPS для Mini App):
-  - `docs/dokploy.md`
-- Рекомендуемая схема доменов:
-  - `app.example.com` -> web service (port `4173`)
-  - `api.example.com` -> api service (port `8000`)
-
 ## Конфигурация
 Минимально нужны:
 - `STACK_NAME` — уникальное имя docker compose-стека (например, `tg_anki_prod`)
@@ -324,12 +275,3 @@ uv run python scripts/generation_metrics_report.py --limit 50 \
 - При проблемах с embeddings включается **лексический fallback**.
 - Отмена/перезапуск генерации автоматически завершает старые задачи.
 
-## Структура репозитория
-```
-api/        FastAPI + SQLAlchemy + Alembic
-worker/     Celery pipeline
-bot/        Telegram bot (aiogram)
-web/        React Mini App (Vite)
-infra/      Docker + scripts
-data/       runtime data (encrypted files, exports)
-```
